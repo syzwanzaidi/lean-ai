@@ -23,19 +23,33 @@ st.set_page_config(
 st.markdown("""
 <style>
 .block-container {
-    padding-top: 1rem;
-    padding-bottom: 0rem;
+    padding-top: 2.2rem !important;
+    padding-bottom: 0rem !important;
+    max-width: 96% !important;
 }
 h1 {
-    font-size: 36px !important;
-    margin-bottom: 0.5rem !important;
+    font-size: 24px !important;
+    margin-bottom: 0.15rem !important;
+}
+h2, h3 {
+    font-size: 20px !important;
+    margin-top: 0.1rem !important;
+    margin-bottom: 0.25rem !important;
 }
 .stAlert {
-    padding: 0.8rem !important;
+    padding: 0.5rem !important;
+    margin-bottom: 0.3rem !important;
 }
 div[data-testid="stImage"] img {
-    max-height: 620px;
+    max-height: 430px;
     object-fit: contain;
+}
+button {
+    height: 38px !important;
+}
+hr {
+    margin-top: 0.3rem !important;
+    margin-bottom: 0.3rem !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -48,11 +62,34 @@ if "last_result" not in st.session_state:
 
 current_step = STEPS[st.session_state.current_step]
 
-top_left, top_right = st.columns([2, 1])
+if current_step["id"] == 5:
+    st.markdown("""
+    <div style="
+        text-align: center;
+        padding: 45px 20px;
+        border-radius: 20px;
+        background: linear-gradient(135deg, #0f5132, #198754);
+        color: white;
+        margin-top: 20px;
+    ">
+        <h1 style="font-size: 48px;">✅ Assembly Completed</h1>
+        <h2>Lamp assembly has been verified successfully.</h2>
+        <p style="font-size: 20px;">All required steps are completed.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("Restart Assembly", use_container_width=True):
+        st.session_state.current_step = 0
+        st.session_state.last_result = None
+        st.rerun()
+
+    st.stop()
+
+top_left, top_right = st.columns([3, 1])
 
 with top_left:
     st.title("Lean AI Assembly Guide")
-    st.subheader(f"Step {current_step['id']}")
+    st.subheader(f"Step {current_step['id']}: {current_step['title']}")
     st.info(current_step["instruction"])
 
 with top_right:
@@ -76,9 +113,7 @@ with top_right:
                 st.session_state.last_result = None
                 st.rerun()
 
-st.divider()
-
-camera_col, status_col = st.columns([3, 1])
+camera_col, status_col = st.columns([4, 1.25])
 
 with camera_col:
     st.markdown("### Live Camera")
@@ -108,7 +143,7 @@ with status_col:
 camera = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
 
 if not camera.isOpened():
-    st.error("Failed to open camera.")
+    st.error("Failed to open camera. Try changing CAMERA_INDEX to 0 or 2.")
     st.stop()
 
 verification_done = False
@@ -128,7 +163,6 @@ while True:
     zy2 = int(height * ZONE["y2_ratio"])
 
     original_frame = frame.copy()
-
     display_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     cv2.rectangle(
@@ -161,7 +195,6 @@ while True:
         os.makedirs("captured", exist_ok=True)
 
         current_crop = original_frame[zy1:zy2, zx1:zx2]
-
         current_image_path = f"captured/current_step_{current_step['id']}.jpg"
         reference_image_paths = current_step["reference_images"]
 
@@ -173,6 +206,7 @@ while True:
         ]
 
         if missing_refs:
+            camera.release()
             st.session_state.last_result = {
                 "status": "waiting",
                 "message": f"Reference image not found: {missing_refs[0]}"
@@ -188,8 +222,10 @@ while True:
 
         st.session_state.last_result = result
 
+        camera.release()
+
         if result["status"] == "correct":
-            time.sleep(1)
+            time.sleep(0.7)
 
             if st.session_state.current_step < len(STEPS) - 1:
                 st.session_state.current_step += 1
