@@ -12,8 +12,6 @@ load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 MODEL_NAME = "gpt-4.1"
-# If still inconsistent, change to:
-# MODEL_NAME = "gpt-4.1"
 
 
 def file_hash(image_path):
@@ -46,35 +44,48 @@ def extract_json(text):
     }
 
 
-def verify_step(reference_image_path, current_image_path, instruction):
-    if file_hash(reference_image_path) == file_hash(current_image_path):
-        return {
-            "status": "correct",
-            "message": "Current image exactly matches the reference image."
-        }
+def verify_step(reference_image_paths, current_image_path, step):
+    for ref_path in reference_image_paths:
+        if file_hash(ref_path) == file_hash(current_image_path):
+            return {
+                "status": "correct",
+                "message": "Current image exactly matches one of the reference images."
+            }
 
-    reference_base64 = encode_image(reference_image_path)
-    current_base64 = encode_image(current_image_path)
+    must_have_text = "\n".join([f"- {item}" for item in step.get("must_have", [])])
+    must_not_require_text = "\n".join([f"- {item}" for item in step.get("must_not_require", [])])
 
     prompt = f"""
-You are a visual assembly verification system.
+You are an industrial assembly verification inspector.
 
-Compare two images:
-- Image 1: Reference correct assembly for this step
-- Image 2: Current user assembly
+You will receive:
+- Several reference images showing acceptable correct versions of the current step
+- One current image showing the user's assembly
+
+Current Step:
+Step {step["id"]}: {step["title"]}
 
 Instruction:
-{instruction}
+{step["instruction"]}
 
-Decision rules:
-1. Judge mainly by visible assembly shape and visible connected parts.
-2. Ignore object position, rotation, angle, and small placement differences.
-3. Ignore background, baskets, table, lighting, shadows, and camera crop differences.
-4. Do NOT invent missing screws, nuts, bolts, or hidden parts unless they are clearly visible in Image 1 and clearly absent in Image 2.
-5. If Image 2 shows the same visible assembly state as Image 1, return correct.
-6. If Image 2 is clearly missing a major visible component compared to Image 1, return wrong.
-7. If the object is blocked, blurry, or outside the image, return waiting.
-8. Be practical for a showcase demo. Do not be overly strict.
+Verification Goal:
+{step["verification_goal"]}
+
+Required visible conditions:
+{must_have_text}
+
+Do NOT require these for this step:
+{must_not_require_text}
+
+Strict rules:
+1. Only judge the CURRENT STEP, not the final product.
+2. The current image only needs to match ONE acceptable reference image.
+3. Ignore position, rotation, cable shape, lighting, shadows, and background.
+4. Do NOT invent missing screws/nuts/bolts unless they are clearly required in the Required visible conditions.
+5. If a Required visible condition is clearly missing, return wrong.
+6. If all Required visible conditions are visible, return correct.
+7. If the image is blurry, blocked, or the part is outside the view, return waiting.
+8. Be consistent and practical for a live showcase demo.
 
 Return JSON only:
 {{
@@ -83,6 +94,27 @@ Return JSON only:
 }}
 """
 
+    content = [{"type": "text", "text": prompt}]
+
+    for index, ref_path in enumerate(reference_image_paths, start=1):
+        content.append({"type": "text", "text": f"Reference image {index}:"})
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{encode_image(ref_path)}",
+                "detail": "high"
+            }
+        })
+
+    content.append({"type": "text", "text": "Current user assembly image:"})
+    content.append({
+        "type": "image_url",
+        "image_url": {
+            "url": f"data:image/jpeg;base64,{encode_image(current_image_path)}",
+            "detail": "high"
+        }
+    })
+
     response = client.chat.completions.create(
         model=MODEL_NAME,
         temperature=0,
@@ -90,27 +122,10 @@ Return JSON only:
         messages=[
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{reference_base64}",
-                            "detail": "high"
-                        }
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{current_base64}",
-                            "detail": "high"
-                        }
-                    }
-                ]
+                "content": content
             }
         ],
         max_tokens=250
     )
 
-    text = response.choices[0].message.content
-    return extract_json(text)
+    return extract_json(response.choices[0].message.content)

@@ -163,22 +163,27 @@ while True:
         current_crop = original_frame[zy1:zy2, zx1:zx2]
 
         current_image_path = f"captured/current_step_{current_step['id']}.jpg"
-        reference_image_path = current_step["reference_image"]
+        reference_image_paths = current_step["reference_images"]
 
         cv2.imwrite(current_image_path, current_crop)
 
-        if not os.path.exists(reference_image_path):
+        missing_refs = [
+            ref for ref in reference_image_paths
+            if not os.path.exists(ref)
+        ]
+
+        if missing_refs:
             st.session_state.last_result = {
                 "status": "waiting",
-                "message": f"Reference image not found: {reference_image_path}"
+                "message": f"Reference image not found: {missing_refs[0]}"
             }
             st.rerun()
 
         with st.spinner("AI is verifying the assembly..."):
             result = verify_step(
-                reference_image_path=reference_image_path,
+                reference_image_paths=reference_image_paths,
                 current_image_path=current_image_path,
-                instruction=current_step["instruction"]
+                step=current_step
             )
 
         st.session_state.last_result = result
