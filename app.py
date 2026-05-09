@@ -6,7 +6,7 @@ from PIL import Image
 
 from steps import STEPS
 from openai_verifier import verify_step
-from action_logger import start_action, stop_action
+from motion_detector import calculate_motion_score, classify_motion
 
 ZONE = {
     "x1_ratio": 0.02,
@@ -16,6 +16,9 @@ ZONE = {
 }
 
 CAMERA_INDEX = 1
+MOTION_THRESHOLD = 3000
+MIN_ACTION_DURATION = 2.0
+IDLE_GRACE_SECONDS = 3.0
 
 st.set_page_config(
     page_title="Lean AI Assembly Guide",
@@ -49,12 +52,58 @@ div[data-testid="stImage"] img {
 button {
     height: 38px !important;
 }
-hr {
-    margin-top: 0.3rem !important;
-    margin-bottom: 0.3rem !important;
+.motion-card {
+    padding: 10px;
+    border-radius: 10px;
+    background: #f8f9fa;
+    border: 1px solid #ddd;
+    margin-bottom: 10px;
+}
+.motion-action {
+    font-size: 20px;
+    font-weight: 700;
 }
 </style>
 """, unsafe_allow_html=True)
+
+
+def log_action(action_name, action_type, description, start_time, end_time, step):
+    duration = end_time - start_time
+
+    if duration < MIN_ACTION_DURATION:
+        return
+
+    st.session_state.action_logs.append({
+        "step_id": step["id"],
+        "action_name": action_name,
+        "description": description,
+        "action_type": action_type,
+        "start_time": round(start_time, 2),
+        "end_time": round(end_time, 2),
+        "duration_seconds": round(duration, 2),
+    })
+
+
+def log_motion_action(end_time, step):
+    action_name = st.session_state.current_motion_action
+    start_time = st.session_state.motion_action_start_time
+
+    if action_name == "ASSEMBLE":
+        action_type = "VA"
+        description = f"Operator performed assembly activity during {step['title']}."
+    else:
+        action_type = "NVA"
+        description = f"Operator was idle during {step['title']}."
+
+    log_action(
+        action_name=action_name,
+        action_type=action_type,
+        description=description,
+        start_time=start_time,
+        end_time=end_time,
+        step=step
+    )
+
 
 # =========================
 # SESSION STATE
@@ -68,18 +117,39 @@ if "last_result" not in st.session_state:
 if "action_logs" not in st.session_state:
     st.session_state.action_logs = []
 
-if "active_action" not in st.session_state:
-    st.session_state.active_action = None
+if "previous_zone_frame" not in st.session_state:
+    st.session_state.previous_zone_frame = None
+
+if "detected_action" not in st.session_state:
+    st.session_state.detected_action = "IDLE"
+
+if "motion_score" not in st.session_state:
+    st.session_state.motion_score = 0
+
+if "current_motion_action" not in st.session_state:
+    st.session_state.current_motion_action = "IDLE"
+
+if "motion_action_start_time" not in st.session_state:
+    st.session_state.motion_action_start_time = time.time()
+
+if "last_motion_time" not in st.session_state:
+    st.session_state.last_motion_time = time.time()
 
 if "active_step_id" not in st.session_state:
     st.session_state.active_step_id = None
 
+
 current_step = STEPS[st.session_state.current_step]
 
-# Start action timer automatically when step changes
+# Reset motion tracking when step changes
 if current_step["id"] != 5 and st.session_state.active_step_id != current_step["id"]:
-    st.session_state.active_action = start_action(current_step)
     st.session_state.active_step_id = current_step["id"]
+    st.session_state.previous_zone_frame = None
+    st.session_state.detected_action = "IDLE"
+    st.session_state.motion_score = 0
+    st.session_state.current_motion_action = "IDLE"
+    st.session_state.motion_action_start_time = time.time()
+
 
 # =========================
 # COMPLETION SCREEN
@@ -88,25 +158,120 @@ if current_step["id"] == 5:
     st.markdown("""
     <div style="
         text-align: center;
-        padding: 45px 20px;
+        padding: 35px 20px;
         border-radius: 20px;
         background: linear-gradient(135deg, #0f5132, #198754);
         color: white;
         margin-top: 20px;
     ">
-        <h1 style="font-size: 48px;">✅ Assembly Completed</h1>
+        <h1 style="font-size: 44px;">✅ Assembly Completed</h1>
         <h2>Lamp assembly has been verified successfully.</h2>
-        <p style="font-size: 20px;">All required steps are completed.</p>
+        <p style="font-size: 18px;">All required steps are completed.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    st.subheader("Assembly Action Log")
+    st.subheader("Lean Analytics Summary")
 
     if st.session_state.action_logs:
-        st.dataframe(
-            st.session_state.action_logs,
-            use_container_width=True    
+        logs = st.session_state.action_logs
+
+        total_va = sum(
+            log["duration_seconds"]
+            for log in logs
+            if log["action_type"] == "VA"
         )
+
+        total_nva = sum(
+            log["duration_seconds"]
+            for log in logs
+            if log["action_type"] == "NVA"
+        )
+
+        total_nnva = sum(
+            log["duration_seconds"]
+            for log in logs
+            if log["action_type"] == "NNVA"
+        )
+
+        total_time = total_va + total_nva + total_nnva
+
+        efficiency = 0
+
+        if total_time > 0:
+            efficiency = (total_va / total_time) * 100
+
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+
+        with kpi1:
+            st.metric("Total VA Time", f"{total_va:.2f}s")
+
+        with kpi2:
+            st.metric("Total NVA Time", f"{total_nva:.2f}s")
+
+        with kpi3:
+            st.metric("Total Time", f"{total_time:.2f}s")
+
+        with kpi4:
+            st.metric("Efficiency", f"{efficiency:.1f}%")
+
+        st.subheader("Lean Time Distribution")
+
+        chart_data = {
+            "VA": total_va,
+            "NVA": total_nva,
+            "NNVA": total_nnva
+        }
+
+        st.bar_chart(chart_data)
+
+        st.subheader("Action Duration by Type")
+
+        summary_by_action = {}
+
+        for log in logs:
+            action_name = log["action_name"]
+
+            if action_name not in summary_by_action:
+                summary_by_action[action_name] = 0
+
+            summary_by_action[action_name] += log["duration_seconds"]
+
+        st.bar_chart(summary_by_action)
+
+        st.subheader("Lean Action Log")
+
+        st.dataframe(
+            logs,
+            use_container_width=True
+        )
+
+        csv_rows = [
+            "step_id,action_name,description,action_type,start_time,end_time,duration_seconds"
+        ]
+
+        for log in logs:
+            row = [
+                str(log["step_id"]),
+                log["action_name"],
+                log["description"].replace(",", " "),
+                log["action_type"],
+                str(log["start_time"]),
+                str(log["end_time"]),
+                str(log["duration_seconds"])
+            ]
+
+            csv_rows.append(",".join(row))
+
+        csv_data = "\n".join(csv_rows)
+
+        st.download_button(
+            label="Download Lean Report CSV",
+            data=csv_data,
+            file_name="lean_ai_assembly_report.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
     else:
         st.info("No action logs recorded yet.")
 
@@ -114,7 +279,11 @@ if current_step["id"] == 5:
         st.session_state.current_step = 0
         st.session_state.last_result = None
         st.session_state.action_logs = []
-        st.session_state.active_action = None
+        st.session_state.previous_zone_frame = None
+        st.session_state.detected_action = "IDLE"
+        st.session_state.motion_score = 0
+        st.session_state.current_motion_action = "IDLE"
+        st.session_state.motion_action_start_time = time.time()
         st.session_state.active_step_id = None
         st.rerun()
 
@@ -151,6 +320,7 @@ with top_right:
                 st.session_state.last_result = None
                 st.rerun()
 
+
 # =========================
 # MAIN LAYOUT
 # =========================
@@ -180,9 +350,16 @@ with status_col:
         type="primary"
     )
 
-    if st.session_state.active_action:
-        elapsed = time.time() - st.session_state.active_action["start_time"]
-        st.caption(f"Current action time: {elapsed:.1f}s")
+    st.markdown(
+        f"""
+        <div class="motion-card">
+            <div>Detected Action</div>
+            <div class="motion-action">{st.session_state.detected_action}</div>
+            <div>Motion Score: {st.session_state.motion_score}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     if st.session_state.last_result:
         result = st.session_state.last_result
@@ -195,6 +372,7 @@ with status_col:
             st.warning(result["message"])
     else:
         st.info("Complete the step, then click Verify Step.")
+
 
 # =========================
 # CAMERA
@@ -222,23 +400,59 @@ while True:
     zy2 = int(height * ZONE["y2_ratio"])
 
     original_frame = frame.copy()
+    current_zone_frame = original_frame[zy1:zy2, zx1:zx2]
+
+    motion_score = calculate_motion_score(
+        st.session_state.previous_zone_frame,
+        current_zone_frame
+    )
+
+    raw_action = classify_motion(
+        motion_score,
+        motion_threshold=MOTION_THRESHOLD
+    )
+
+    now = time.time()
+
+    if raw_action == "ASSEMBLE":
+        st.session_state.last_motion_time = now
+        detected_action = "ASSEMBLE"
+    else:
+        if now - st.session_state.last_motion_time >= IDLE_GRACE_SECONDS:
+            detected_action = "IDLE"
+        else:
+            detected_action = "ASSEMBLE"
+
+    if detected_action != st.session_state.current_motion_action:
+        log_motion_action(now, current_step)
+        st.session_state.current_motion_action = detected_action
+        st.session_state.motion_action_start_time = now
+
+    st.session_state.motion_score = motion_score
+    st.session_state.detected_action = detected_action
+    st.session_state.previous_zone_frame = current_zone_frame.copy()
+
     display_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    zone_color = (0, 255, 0)
+    if detected_action == "ASSEMBLE":
+        zone_color = (255, 165, 0)
 
     cv2.rectangle(
         display_frame,
         (zx1, zy1),
         (zx2, zy2),
-        (0, 255, 0),
+        zone_color,
         3
     )
 
     cv2.putText(
         display_frame,
-        "Assembly Zone",
+        f"Assembly Zone - {detected_action}",
         (zx1, max(zy1 - 8, 22)),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
-        (0, 255, 0),
+        zone_color,
         2
     )
 
@@ -250,6 +464,15 @@ while True:
 
     if verify_clicked and not verification_done:
         verification_done = True
+
+        now = time.time()
+
+        # Log current motion state before verification
+        log_motion_action(now, current_step)
+        st.session_state.motion_action_start_time = now
+
+        # Log VERIFY action as NNVA
+        verify_start = time.time()
 
         os.makedirs("captured", exist_ok=True)
 
@@ -279,22 +502,39 @@ while True:
                 step=current_step
             )
 
+        verify_end = time.time()
+
+        log_action(
+            action_name="VERIFY",
+            action_type="NNVA",
+            description=f"AI verification performed for {current_step['title']}.",
+            start_time=verify_start,
+            end_time=verify_end,
+            step=current_step
+        )
+
         st.session_state.last_result = result
 
         camera.release()
 
+        if result["status"] == "wrong":
+            log_action(
+                action_name="REWORK",
+                action_type="NVA",
+                description=f"Assembly was incorrect during {current_step['title']} and requires rework.",
+                start_time=verify_end,
+                end_time=verify_end + 1.0,
+                step=current_step
+            )
+
         if result["status"] == "correct":
-
-            if st.session_state.active_action:
-                completed_action = stop_action(st.session_state.active_action)
-                st.session_state.action_logs.append(completed_action)
-                st.session_state.active_action = None
-                st.session_state.active_step_id = None
-
             time.sleep(0.7)
 
             if st.session_state.current_step < len(STEPS) - 1:
                 st.session_state.current_step += 1
+                st.session_state.current_motion_action = "IDLE"
+                st.session_state.motion_action_start_time = time.time()
+                st.session_state.previous_zone_frame = None
 
         st.rerun()
 
