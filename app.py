@@ -6,6 +6,7 @@ from PIL import Image
 
 from steps import STEPS
 from openai_verifier import verify_step
+from action_logger import start_action, stop_action
 
 ZONE = {
     "x1_ratio": 0.02,
@@ -55,14 +56,34 @@ hr {
 </style>
 """, unsafe_allow_html=True)
 
+# =========================
+# SESSION STATE
+# =========================
 if "current_step" not in st.session_state:
     st.session_state.current_step = 0
 
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
 
+if "action_logs" not in st.session_state:
+    st.session_state.action_logs = []
+
+if "active_action" not in st.session_state:
+    st.session_state.active_action = None
+
+if "active_step_id" not in st.session_state:
+    st.session_state.active_step_id = None
+
 current_step = STEPS[st.session_state.current_step]
 
+# Start action timer automatically when step changes
+if current_step["id"] != 5 and st.session_state.active_step_id != current_step["id"]:
+    st.session_state.active_action = start_action(current_step)
+    st.session_state.active_step_id = current_step["id"]
+
+# =========================
+# COMPLETION SCREEN
+# =========================
 if current_step["id"] == 5:
     st.markdown("""
     <div style="
@@ -79,13 +100,29 @@ if current_step["id"] == 5:
     </div>
     """, unsafe_allow_html=True)
 
+    st.subheader("Assembly Action Log")
+
+    if st.session_state.action_logs:
+        st.dataframe(
+            st.session_state.action_logs,
+            use_container_width=True    
+        )
+    else:
+        st.info("No action logs recorded yet.")
+
     if st.button("Restart Assembly", use_container_width=True):
         st.session_state.current_step = 0
         st.session_state.last_result = None
+        st.session_state.action_logs = []
+        st.session_state.active_action = None
+        st.session_state.active_step_id = None
         st.rerun()
 
     st.stop()
 
+# =========================
+# HEADER
+# =========================
 top_left, top_right = st.columns([3, 1])
 
 with top_left:
@@ -114,6 +151,9 @@ with top_right:
                 st.session_state.last_result = None
                 st.rerun()
 
+# =========================
+# MAIN LAYOUT
+# =========================
 live_col, ref_col, status_col = st.columns([2.4, 1.4, 1.2])
 
 with live_col:
@@ -140,6 +180,10 @@ with status_col:
         type="primary"
     )
 
+    if st.session_state.active_action:
+        elapsed = time.time() - st.session_state.active_action["start_time"]
+        st.caption(f"Current action time: {elapsed:.1f}s")
+
     if st.session_state.last_result:
         result = st.session_state.last_result
 
@@ -152,6 +196,9 @@ with status_col:
     else:
         st.info("Complete the step, then click Verify Step.")
 
+# =========================
+# CAMERA
+# =========================
 camera = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
 
 if not camera.isOpened():
@@ -237,6 +284,13 @@ while True:
         camera.release()
 
         if result["status"] == "correct":
+
+            if st.session_state.active_action:
+                completed_action = stop_action(st.session_state.active_action)
+                st.session_state.action_logs.append(completed_action)
+                st.session_state.active_action = None
+                st.session_state.active_step_id = None
+
             time.sleep(0.7)
 
             if st.session_state.current_step < len(STEPS) - 1:

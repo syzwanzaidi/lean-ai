@@ -4,6 +4,7 @@ STEPS = [
         "title": "LED Module Installation",
         "instruction": "Insert the LED Module into the LED Housing.",
         "verification_goal": "The LED Module must be inserted into the LED Housing. The outer diffuser cover and mounting base are not required yet.",
+        "action_type": "VA",
         "must_have": [
             "LED Module is visible",
             "LED Housing is attached",
@@ -26,6 +27,7 @@ STEPS = [
         "title": "Internal Diffuser Spacer Installation",
         "instruction": "Attach the Internal Diffuser Spacer to the LED Module assembly.",
         "verification_goal": "The internal diffuser spacer/holder must be attached around the LED strip. Do not reject because of small angle or cable position differences.",
+        "action_type": "VA",
         "must_have": [
             "LED Module is visible",
             "LED Housing is attached",
@@ -48,6 +50,7 @@ STEPS = [
         "title": "Outer Diffuser Cover Installation",
         "instruction": "Close the assembly using the Outer Diffuser Cover.",
         "verification_goal": "The transparent/white cylindrical Outer Diffuser Cover must cover the internal LED module and spacer. If the LED strip/spacer is still exposed, this step is wrong.",
+        "action_type": "VA",
         "must_have": [
             "Outer Diffuser Cover is installed",
             "LED strip is covered",
@@ -67,6 +70,7 @@ STEPS = [
         "title": "Mounting Base Installation",
         "instruction": "Attach the completed lamp body to the flat round Mounting Base using the nut and bolt.",
         "verification_goal": "The completed lamp body must be attached to the large flat round mounting base/plate. The base has a flat circular plate with screw holes. If only the small circular joint/bracket is visible, this is NOT correct.",
+        "action_type": "VA",
         "must_have": [
             "Closed lamp body",
             "Large flat round mounting base/plate is attached",

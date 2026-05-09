@@ -1,4 +1,4 @@
-from gemini_verifier import verify_step
+from gemini.gemini_verifier import verify_step
 
 result = verify_step(
     reference_image_path="references/step_1.jpg",
