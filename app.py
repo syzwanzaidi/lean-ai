@@ -2,6 +2,7 @@ import os
 import time
 import cv2
 import streamlit as st
+from PIL import Image
 
 from steps import STEPS
 from openai_verifier import verify_step
@@ -113,11 +114,22 @@ with top_right:
                 st.session_state.last_result = None
                 st.rerun()
 
-camera_col, status_col = st.columns([4, 1.25])
+live_col, ref_col, status_col = st.columns([2.4, 1.4, 1.2])
 
-with camera_col:
+with live_col:
     st.markdown("### Live Camera")
     frame_placeholder = st.empty()
+
+with ref_col:
+    st.markdown("### Expected Result")
+
+    reference_images = current_step.get("reference_images", [])
+
+    if reference_images and os.path.exists(reference_images[0]):
+        ref_img = Image.open(reference_images[0])
+        st.image(ref_img, use_container_width=True)
+    else:
+        st.warning("No reference image found.")
 
 with status_col:
     st.markdown("### AI Verification")
