@@ -16,7 +16,7 @@ ZONE = {
 }
 
 CAMERA_INDEX = 1
-MOTION_THRESHOLD = 3000
+MOTION_THRESHOLD = 800
 MIN_ACTION_DURATION = 2.0
 IDLE_GRACE_SECONDS = 3.0
 
@@ -53,15 +53,22 @@ button {
     height: 38px !important;
 }
 .motion-card {
-    padding: 10px;
+    padding: 12px;
     border-radius: 10px;
-    background: #f8f9fa;
-    border: 1px solid #ddd;
+    background: #132f4c;
+    border: 1px solid #1f6feb;
     margin-bottom: 10px;
+    color: #ffffff;
 }
+
+.motion-card div {
+    color: #ffffff;
+}
+
 .motion-action {
-    font-size: 20px;
+    font-size: 22px;
     font-weight: 700;
+    color: #4ade80 !important;
 }
 </style>
 """, unsafe_allow_html=True)
