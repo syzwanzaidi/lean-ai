@@ -4,9 +4,16 @@ import cv2
 import streamlit as st
 from PIL import Image
 
-from steps import STEPS
+from lamp_steps import STEPS as LAMP_STEPS
+from keychain_steps import STEPS as KEYCHAIN_STEPS
+
 from openai_verifier import verify_step
 from motion_detector import calculate_motion_score, classify_motion
+
+PRODUCTS = {
+    "Lamp Assembly": LAMP_STEPS,
+    "Keychain Assembly": KEYCHAIN_STEPS,
+}
 
 ZONE = {
     "x1_ratio": 0.02,
@@ -60,11 +67,9 @@ button {
     margin-bottom: 10px;
     color: #ffffff;
 }
-
 .motion-card div {
     color: #ffffff;
 }
-
 .motion-action {
     font-size: 22px;
     font-weight: 700;
@@ -72,6 +77,19 @@ button {
 }
 </style>
 """, unsafe_allow_html=True)
+
+
+def reset_run_state():
+    st.session_state.current_step = 0
+    st.session_state.last_result = None
+    st.session_state.action_logs = []
+    st.session_state.previous_zone_frame = None
+    st.session_state.detected_action = "IDLE"
+    st.session_state.motion_score = 0
+    st.session_state.current_motion_action = "IDLE"
+    st.session_state.motion_action_start_time = time.time()
+    st.session_state.last_motion_time = time.time()
+    st.session_state.active_step_id = None
 
 
 def log_action(action_name, action_type, description, start_time, end_time, step):
@@ -115,6 +133,9 @@ def log_motion_action(end_time, step):
 # =========================
 # SESSION STATE
 # =========================
+if "selected_product" not in st.session_state:
+    st.session_state.selected_product = "Lamp Assembly"
+
 if "current_step" not in st.session_state:
     st.session_state.current_step = 0
 
@@ -146,23 +167,45 @@ if "active_step_id" not in st.session_state:
     st.session_state.active_step_id = None
 
 
+# =========================
+# PRODUCT SELECTOR
+# =========================
+selected_product = st.sidebar.radio(
+    "Select Product",
+    list(PRODUCTS.keys()),
+    index=list(PRODUCTS.keys()).index(st.session_state.selected_product)
+)
+
+if selected_product != st.session_state.selected_product:
+    st.session_state.selected_product = selected_product
+    reset_run_state()
+    st.rerun()
+
+STEPS = PRODUCTS[st.session_state.selected_product]
+
+if st.session_state.current_step >= len(STEPS):
+    st.session_state.current_step = 0
+
 current_step = STEPS[st.session_state.current_step]
+is_completion_step = st.session_state.current_step == len(STEPS) - 1
+
 
 # Reset motion tracking when step changes
-if current_step["id"] != 5 and st.session_state.active_step_id != current_step["id"]:
+if not is_completion_step and st.session_state.active_step_id != current_step["id"]:
     st.session_state.active_step_id = current_step["id"]
     st.session_state.previous_zone_frame = None
     st.session_state.detected_action = "IDLE"
     st.session_state.motion_score = 0
     st.session_state.current_motion_action = "IDLE"
     st.session_state.motion_action_start_time = time.time()
+    st.session_state.last_motion_time = time.time()
 
 
 # =========================
 # COMPLETION SCREEN
 # =========================
-if current_step["id"] == 5:
-    st.markdown("""
+if is_completion_step:
+    st.markdown(f"""
     <div style="
         text-align: center;
         padding: 35px 20px;
@@ -171,8 +214,8 @@ if current_step["id"] == 5:
         color: white;
         margin-top: 20px;
     ">
-        <h1 style="font-size: 44px;">✅ Assembly Completed</h1>
-        <h2>Lamp assembly has been verified successfully.</h2>
+        <h1 style="font-size: 44px;">Assembly Completed</h1>
+        <h2>{st.session_state.selected_product} has been verified successfully.</h2>
         <p style="font-size: 18px;">All required steps are completed.</p>
     </div>
     """, unsafe_allow_html=True)
@@ -201,11 +244,7 @@ if current_step["id"] == 5:
         )
 
         total_time = total_va + total_nva + total_nnva
-
-        efficiency = 0
-
-        if total_time > 0:
-            efficiency = (total_va / total_time) * 100
+        efficiency = (total_va / total_time) * 100 if total_time > 0 else 0
 
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 
@@ -274,7 +313,7 @@ if current_step["id"] == 5:
         st.download_button(
             label="Download Lean Report CSV",
             data=csv_data,
-            file_name="lean_ai_assembly_report.csv",
+            file_name=f"{st.session_state.selected_product.lower().replace(' ', '_')}_lean_report.csv",
             mime="text/csv",
             use_container_width=True
         )
@@ -283,18 +322,11 @@ if current_step["id"] == 5:
         st.info("No action logs recorded yet.")
 
     if st.button("Restart Assembly", use_container_width=True):
-        st.session_state.current_step = 0
-        st.session_state.last_result = None
-        st.session_state.action_logs = []
-        st.session_state.previous_zone_frame = None
-        st.session_state.detected_action = "IDLE"
-        st.session_state.motion_score = 0
-        st.session_state.current_motion_action = "IDLE"
-        st.session_state.motion_action_start_time = time.time()
-        st.session_state.active_step_id = None
+        reset_run_state()
         st.rerun()
 
     st.stop()
+
 
 # =========================
 # HEADER
@@ -303,6 +335,7 @@ top_left, top_right = st.columns([3, 1])
 
 with top_left:
     st.title("Lean AI Assembly Guide")
+    st.caption(f"Selected Product: {st.session_state.selected_product}")
     st.subheader(f"Step {current_step['id']}: {current_step['title']}")
     st.info(current_step["instruction"])
 
@@ -484,7 +517,8 @@ while True:
         os.makedirs("captured", exist_ok=True)
 
         current_crop = original_frame[zy1:zy2, zx1:zx2]
-        current_image_path = f"captured/current_step_{current_step['id']}.jpg"
+        safe_product_name = st.session_state.selected_product.lower().replace(" ", "_")
+        current_image_path = f"captured/{safe_product_name}_current_step_{current_step['id']}.jpg"
         reference_image_paths = current_step["reference_images"]
 
         cv2.imwrite(current_image_path, current_crop)
@@ -542,6 +576,7 @@ while True:
                 st.session_state.current_motion_action = "IDLE"
                 st.session_state.motion_action_start_time = time.time()
                 st.session_state.previous_zone_frame = None
+                st.session_state.last_motion_time = time.time()
 
         st.rerun()
 
