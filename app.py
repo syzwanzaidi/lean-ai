@@ -1,6 +1,8 @@
 import os
 import time
 import cv2
+import requests
+import pandas as pd
 import streamlit as st
 from PIL import Image
 
@@ -9,6 +11,7 @@ from keychain_steps import STEPS as KEYCHAIN_STEPS
 
 from openai_verifier import verify_step
 from motion_detector import calculate_motion_score, classify_motion
+
 
 PRODUCTS = {
     "Lamp Assembly": LAMP_STEPS,
@@ -23,9 +26,17 @@ ZONE = {
 }
 
 CAMERA_INDEX = 1
+
 MOTION_THRESHOLD = 800
 MIN_ACTION_DURATION = 2.0
 IDLE_GRACE_SECONDS = 3.0
+
+NEMOTRON_URL = "http://192.168.8.238:8000/analyze"
+NEMOTRON_FPS = 8
+FRAME_SAMPLE_INTERVAL = 3
+MAX_NEMOTRON_FRAMES = 900
+NEMOTRON_CLIP_DIR = "captured/nemotron_clips"
+
 
 st.set_page_config(
     page_title="Lean AI Assembly Guide",
@@ -91,6 +102,20 @@ def reset_run_state():
     st.session_state.last_motion_time = time.time()
     st.session_state.active_step_id = None
 
+    st.session_state.step_frame_buffer = []
+    st.session_state.buffer_frame_counter = 0
+    st.session_state.saved_nemotron_clips = []
+    st.session_state.nemotron_step_results = []
+    st.session_state.last_nemotron_result = None
+    st.session_state.nemotron_processed = False
+
+
+def format_relative_time(seconds):
+    seconds = int(round(seconds))
+    minutes = seconds // 60
+    secs = seconds % 60
+    return f"{minutes:02d}:{secs:02d}"
+
 
 def log_action(action_name, action_type, description, start_time, end_time, step):
     duration = end_time - start_time
@@ -130,6 +155,324 @@ def log_motion_action(end_time, step):
     )
 
 
+def save_frames_to_video(frames, output_path, fps=8):
+    if not frames:
+        return False
+
+    height, width = frames[0].shape[:2]
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+    for frame in frames:
+        if frame.shape[:2] != (height, width):
+            frame = cv2.resize(frame, (width, height))
+
+        writer.write(frame)
+
+    writer.release()
+    return True
+
+
+def analyze_step_with_nemotron(video_path, step):
+    try:
+        with open(video_path, "rb") as video_file:
+            response = requests.post(
+                NEMOTRON_URL,
+                files={"file": ("step_video.mp4", video_file, "video/mp4")},
+                data={
+                    "step_id": str(step["id"]),
+                    "step_title": step["title"],
+                },
+                timeout=1800
+            )
+
+        if response.status_code != 200:
+            return {
+                "error": True,
+                "message": response.text,
+                "actions": []
+            }
+
+        return response.json()
+
+    except requests.exceptions.ConnectionError:
+        return {
+            "error": True,
+            "message": "Cannot connect to Nemotron AI PC server.",
+            "actions": []
+        }
+
+    except requests.exceptions.Timeout:
+        return {
+            "error": True,
+            "message": "Nemotron analysis timed out.",
+            "actions": []
+        }
+
+    except Exception as e:
+        return {
+            "error": True,
+            "message": str(e),
+            "actions": []
+        }
+
+
+def convert_nemotron_result_to_rows(result, step):
+    rows = []
+
+    for action in result.get("actions", []):
+        rows.append({
+            "step_id": step["id"],
+            "step_title": step["title"],
+            "start_time": action.get("start_time"),
+            "end_time": action.get("end_time"),
+            "duration_seconds": float(action.get("duration_seconds", 0) or 0),
+            "action_name": action.get("action_name", "Unknown"),
+            "action_type": action.get("action_type", "VA"),
+            "source": "Nemotron"
+        })
+
+    return rows
+
+
+def save_current_step_clip(step):
+    if not st.session_state.step_frame_buffer:
+        return None
+
+    os.makedirs(NEMOTRON_CLIP_DIR, exist_ok=True)
+
+    safe_product_name = st.session_state.selected_product.lower().replace(" ", "_")
+    clip_path = (
+        f"{NEMOTRON_CLIP_DIR}/"
+        f"{safe_product_name}_step_{step['id']}_nemotron.mp4"
+    )
+
+    saved = save_frames_to_video(
+        frames=st.session_state.step_frame_buffer,
+        output_path=clip_path,
+        fps=NEMOTRON_FPS
+    )
+
+    if not saved:
+        return None
+
+    clip_info = {
+        "step_id": step["id"],
+        "step_title": step["title"],
+        "clip_path": clip_path,
+    }
+
+    st.session_state.saved_nemotron_clips = [
+        clip for clip in st.session_state.saved_nemotron_clips
+        if clip["step_id"] != step["id"]
+    ]
+
+    st.session_state.saved_nemotron_clips.append(clip_info)
+
+    return clip_path
+
+
+def run_nemotron_for_saved_clips():
+    results = []
+
+    progress = st.progress(0)
+
+    total_clips = len(st.session_state.saved_nemotron_clips)
+
+    for index, clip in enumerate(st.session_state.saved_nemotron_clips):
+        step = {
+            "id": clip["step_id"],
+            "title": clip["step_title"],
+        }
+
+        result = analyze_step_with_nemotron(
+            video_path=clip["clip_path"],
+            step=step
+        )
+
+        st.session_state.last_nemotron_result = result
+
+        rows = convert_nemotron_result_to_rows(
+            result=result,
+            step=step
+        )
+
+        results.extend(rows)
+
+        if total_clips > 0:
+            progress.progress((index + 1) / total_clips)
+
+    st.session_state.nemotron_step_results = results
+    st.session_state.nemotron_processed = True
+
+
+def get_step_title(step_id, steps):
+    for step in steps:
+        if step.get("id") == step_id:
+            return step.get("title", f"Step {step_id}")
+
+    return f"Step {step_id}"
+
+
+def build_unified_timeline(action_logs, nemotron_rows, steps):
+    """
+    OpenCV/Motion = timing engine.
+    Nemotron = semantic action labeler.
+
+    This replaces generic ASSEMBLE rows with Nemotron's real action names.
+    VERIFY, IDLE, and REWORK rows are preserved.
+    """
+
+    unified_rows = []
+    current_time = 0.0
+
+    step_ids = []
+
+    for step in steps:
+        step_id = step.get("id")
+
+        if step_id not in step_ids:
+            step_ids.append(step_id)
+
+    def add_row(step_id, step_title, action_name, action_type, duration, source):
+        nonlocal current_time
+
+        if duration <= 0:
+            return
+
+        start_time = current_time
+        end_time = current_time + duration
+
+        unified_rows.append({
+            "step_id": step_id,
+            "step_title": step_title,
+            "start_time": format_relative_time(start_time),
+            "end_time": format_relative_time(end_time),
+            "duration_seconds": round(duration, 2),
+            "action_name": action_name,
+            "action_type": action_type,
+            "source": source
+        })
+
+        current_time = end_time
+
+    for step_id in step_ids:
+        step_title = get_step_title(step_id, steps)
+
+        step_motion_logs = [
+            log for log in action_logs
+            if log.get("step_id") == step_id
+        ]
+
+        step_nemotron_rows = [
+            row for row in nemotron_rows
+            if row.get("step_id") == step_id
+        ]
+
+        assemble_duration = sum(
+            float(log.get("duration_seconds", 0) or 0)
+            for log in step_motion_logs
+            if log.get("action_name") == "ASSEMBLE"
+        )
+
+        non_assemble_logs = [
+            log for log in step_motion_logs
+            if log.get("action_name") != "ASSEMBLE"
+        ]
+
+        # Replace generic ASSEMBLE rows with Nemotron semantic action rows.
+        if step_nemotron_rows and assemble_duration > 0:
+            total_nemotron_duration = sum(
+                float(row.get("duration_seconds", 0) or 0)
+                for row in step_nemotron_rows
+            )
+
+            if total_nemotron_duration <= 0:
+                total_nemotron_duration = len(step_nemotron_rows)
+
+            for row in step_nemotron_rows:
+                raw_duration = float(row.get("duration_seconds", 0) or 0)
+
+                if raw_duration <= 0:
+                    raw_duration = total_nemotron_duration / max(len(step_nemotron_rows), 1)
+
+                scaled_duration = assemble_duration * (raw_duration / total_nemotron_duration)
+
+                add_row(
+                    step_id=step_id,
+                    step_title=step_title,
+                    action_name=row.get("action_name", "Assembly activity"),
+                    action_type=row.get("action_type", "VA"),
+                    duration=scaled_duration,
+                    source="Nemotron + OpenCV Timing"
+                )
+
+        elif assemble_duration > 0:
+            add_row(
+                step_id=step_id,
+                step_title=step_title,
+                action_name=f"Assembly activity during {step_title}",
+                action_type="VA",
+                duration=assemble_duration,
+                source="OpenCV Motion"
+            )
+
+        # Keep VERIFY / IDLE / REWORK from OpenCV timing.
+        non_assemble_logs = sorted(
+            non_assemble_logs,
+            key=lambda log: float(log.get("start_time", 0) or 0)
+        )
+
+        for log in non_assemble_logs:
+            action_name = log.get("action_name", "UNKNOWN")
+
+            if action_name == "VERIFY":
+                clean_action_name = f"AI verification for {step_title}"
+            elif action_name == "IDLE":
+                clean_action_name = f"Idle / waiting during {step_title}"
+            elif action_name == "REWORK":
+                clean_action_name = f"Rework required during {step_title}"
+            else:
+                clean_action_name = action_name
+
+            add_row(
+                step_id=step_id,
+                step_title=step_title,
+                action_name=clean_action_name,
+                action_type=log.get("action_type", "NVA"),
+                duration=float(log.get("duration_seconds", 0) or 0),
+                source="OpenCV / Verification"
+            )
+
+    return unified_rows
+
+
+def calculate_summary(rows):
+    total_va = sum(
+        row["duration_seconds"]
+        for row in rows
+        if row["action_type"] == "VA"
+    )
+
+    total_nva = sum(
+        row["duration_seconds"]
+        for row in rows
+        if row["action_type"] == "NVA"
+    )
+
+    total_nnva = sum(
+        row["duration_seconds"]
+        for row in rows
+        if row["action_type"] == "NNVA"
+    )
+
+    total_time = total_va + total_nva + total_nnva
+    efficiency = (total_va / total_time) * 100 if total_time > 0 else 0
+
+    return total_va, total_nva, total_nnva, total_time, efficiency
+
+
 # =========================
 # SESSION STATE
 # =========================
@@ -166,6 +509,24 @@ if "last_motion_time" not in st.session_state:
 if "active_step_id" not in st.session_state:
     st.session_state.active_step_id = None
 
+if "step_frame_buffer" not in st.session_state:
+    st.session_state.step_frame_buffer = []
+
+if "buffer_frame_counter" not in st.session_state:
+    st.session_state.buffer_frame_counter = 0
+
+if "saved_nemotron_clips" not in st.session_state:
+    st.session_state.saved_nemotron_clips = []
+
+if "nemotron_step_results" not in st.session_state:
+    st.session_state.nemotron_step_results = []
+
+if "last_nemotron_result" not in st.session_state:
+    st.session_state.last_nemotron_result = None
+
+if "nemotron_processed" not in st.session_state:
+    st.session_state.nemotron_processed = False
+
 
 # =========================
 # PRODUCT SELECTOR
@@ -190,7 +551,7 @@ current_step = STEPS[st.session_state.current_step]
 is_completion_step = st.session_state.current_step == len(STEPS) - 1
 
 
-# Reset motion tracking when step changes
+# Reset motion/Nemotron buffer when step changes
 if not is_completion_step and st.session_state.active_step_id != current_step["id"]:
     st.session_state.active_step_id = current_step["id"]
     st.session_state.previous_zone_frame = None
@@ -199,6 +560,9 @@ if not is_completion_step and st.session_state.active_step_id != current_step["i
     st.session_state.current_motion_action = "IDLE"
     st.session_state.motion_action_start_time = time.time()
     st.session_state.last_motion_time = time.time()
+
+    st.session_state.step_frame_buffer = []
+    st.session_state.buffer_frame_counter = 0
 
 
 # =========================
@@ -222,31 +586,16 @@ if is_completion_step:
 
     st.subheader("Lean Analytics Summary")
 
-    if st.session_state.action_logs:
-        logs = st.session_state.action_logs
+    unified_rows = build_unified_timeline(
+        action_logs=st.session_state.action_logs,
+        nemotron_rows=st.session_state.nemotron_step_results,
+        steps=STEPS
+    )
 
-        total_va = sum(
-            log["duration_seconds"]
-            for log in logs
-            if log["action_type"] == "VA"
-        )
+    if unified_rows:
+        total_va, total_nva, total_nnva, total_time, efficiency = calculate_summary(unified_rows)
 
-        total_nva = sum(
-            log["duration_seconds"]
-            for log in logs
-            if log["action_type"] == "NVA"
-        )
-
-        total_nnva = sum(
-            log["duration_seconds"]
-            for log in logs
-            if log["action_type"] == "NNVA"
-        )
-
-        total_time = total_va + total_nva + total_nnva
-        efficiency = (total_va / total_time) * 100 if total_time > 0 else 0
-
-        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 
         with kpi1:
             st.metric("Total VA Time", f"{total_va:.2f}s")
@@ -255,18 +604,23 @@ if is_completion_step:
             st.metric("Total NVA Time", f"{total_nva:.2f}s")
 
         with kpi3:
-            st.metric("Total Time", f"{total_time:.2f}s")
+            st.metric("Total NNVA Time", f"{total_nnva:.2f}s")
 
         with kpi4:
+            st.metric("Total Time", f"{total_time:.2f}s")
+
+        with kpi5:
             st.metric("Efficiency", f"{efficiency:.1f}%")
 
         st.subheader("Lean Time Distribution")
 
-        chart_data = {
-            "VA": total_va,
-            "NVA": total_nva,
-            "NNVA": total_nnva
-        }
+        chart_data = pd.DataFrame({
+            "Duration": {
+                "VA": total_va,
+                "NVA": total_nva,
+                "NNVA": total_nnva
+            }
+        })
 
         st.bar_chart(chart_data)
 
@@ -274,49 +628,79 @@ if is_completion_step:
 
         summary_by_action = {}
 
-        for log in logs:
-            action_name = log["action_name"]
+        for row in unified_rows:
+            action_name = row["action_name"]
 
             if action_name not in summary_by_action:
                 summary_by_action[action_name] = 0
 
-            summary_by_action[action_name] += log["duration_seconds"]
+            summary_by_action[action_name] += row["duration_seconds"]
 
-        st.bar_chart(summary_by_action)
+        action_chart_data = pd.DataFrame({
+            "Duration": summary_by_action
+        })
 
-        st.subheader("Lean Action Log")
+        st.bar_chart(action_chart_data)
+
+        st.subheader("Unified Lean Action Timeline")
+
+        unified_df = pd.DataFrame(unified_rows)
 
         st.dataframe(
-            logs,
+            unified_df,
             use_container_width=True
         )
 
-        csv_rows = [
-            "step_id,action_name,description,action_type,start_time,end_time,duration_seconds"
-        ]
-
-        for log in logs:
-            row = [
-                str(log["step_id"]),
-                log["action_name"],
-                log["description"].replace(",", " "),
-                log["action_type"],
-                str(log["start_time"]),
-                str(log["end_time"]),
-                str(log["duration_seconds"])
-            ]
-
-            csv_rows.append(",".join(row))
-
-        csv_data = "\n".join(csv_rows)
+        unified_csv = unified_df.to_csv(index=False).encode("utf-8")
 
         st.download_button(
-            label="Download Lean Report CSV",
-            data=csv_data,
-            file_name=f"{st.session_state.selected_product.lower().replace(' ', '_')}_lean_report.csv",
+            label="Download Unified Lean Report CSV",
+            data=unified_csv,
+            file_name=f"{st.session_state.selected_product.lower().replace(' ', '_')}_unified_lean_report.csv",
             mime="text/csv",
             use_container_width=True
         )
+
+        st.subheader("Nemotron AI Timeline")
+
+        st.caption(
+            "Nemotron analysis runs after assembly completion. It provides semantic action names, while OpenCV provides timing."
+        )
+
+        st.write(f"Saved step clips: {len(st.session_state.saved_nemotron_clips)}")
+
+        if st.button("Run Nemotron AI Timeline", use_container_width=True, type="primary"):
+            with st.spinner("Nemotron is analyzing all saved step clips..."):
+                run_nemotron_for_saved_clips()
+
+            st.success("Nemotron analysis completed. Unified timeline updated.")
+            st.rerun()
+
+        if st.session_state.nemotron_processed:
+            if st.session_state.nemotron_step_results:
+                with st.expander("View Nemotron-only Results"):
+                    nemotron_df = pd.DataFrame(st.session_state.nemotron_step_results)
+
+                    st.dataframe(
+                        nemotron_df,
+                        use_container_width=True
+                    )
+
+                    nemotron_csv = nemotron_df.to_csv(index=False).encode("utf-8")
+
+                    st.download_button(
+                        label="Download Nemotron-only CSV",
+                        data=nemotron_csv,
+                        file_name="nemotron_ai_timeline.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+            else:
+                st.warning("Nemotron analysis completed, but no actions were returned.")
+
+        if st.session_state.last_nemotron_result:
+            with st.expander("Last Nemotron Raw Result"):
+                st.json(st.session_state.last_nemotron_result)
 
     else:
         st.info("No action logs recorded yet.")
@@ -396,6 +780,8 @@ with status_col:
             <div>Detected Action</div>
             <div class="motion-action">{st.session_state.detected_action}</div>
             <div>Motion Score: {st.session_state.motion_score}</div>
+            <div>Buffered Frames: {len(st.session_state.step_frame_buffer)}</div>
+            <div>Saved Clips: {len(st.session_state.saved_nemotron_clips)}</div>
         </div>
         """,
         unsafe_allow_html=True
@@ -441,6 +827,15 @@ while True:
 
     original_frame = frame.copy()
     current_zone_frame = original_frame[zy1:zy2, zx1:zx2]
+
+    # Buffer zone frames for Nemotron step clip
+    st.session_state.buffer_frame_counter += 1
+
+    if st.session_state.buffer_frame_counter % FRAME_SAMPLE_INTERVAL == 0:
+        st.session_state.step_frame_buffer.append(current_zone_frame.copy())
+
+        if len(st.session_state.step_frame_buffer) > MAX_NEMOTRON_FRAMES:
+            st.session_state.step_frame_buffer.pop(0)
 
     motion_score = calculate_motion_score(
         st.session_state.previous_zone_frame,
@@ -511,6 +906,9 @@ while True:
         log_motion_action(now, current_step)
         st.session_state.motion_action_start_time = now
 
+        # Save Nemotron clip only. Do not analyze yet.
+        save_current_step_clip(current_step)
+
         # Log VERIFY action as NNVA
         verify_start = time.time()
 
@@ -570,6 +968,9 @@ while True:
 
         if result["status"] == "correct":
             time.sleep(0.7)
+
+            st.session_state.step_frame_buffer = []
+            st.session_state.buffer_frame_counter = 0
 
             if st.session_state.current_step < len(STEPS) - 1:
                 st.session_state.current_step += 1
