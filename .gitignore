@@ -1,5 +1,12 @@
+.env
 venv/
 __pycache__/
-.env
 captured/
-*.pyc
+qwen_video_frames/
+sample_video/
+*.mp4
+*.avi
+*.mov
+streamlit_nemotron_test_backup.py
+streamlit_nemotron_test_backup1.py
+streamlit_nemotron_test_13\ 5/
