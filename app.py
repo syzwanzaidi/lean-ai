@@ -25,13 +25,13 @@ ZONE = {
     "y2_ratio": 0.57
 }
 
-CAMERA_INDEX = 1
+CAMERA_INDEX = 0
 
 MOTION_THRESHOLD = 800
 MIN_ACTION_DURATION = 2.0
 IDLE_GRACE_SECONDS = 3.0
 
-NEMOTRON_URL = "http://192.168.8.238:8000/analyze"
+NEMOTRON_URL = "http://127.0.0.1:8000/analyze"
 NEMOTRON_FPS = 8
 FRAME_SAMPLE_INTERVAL = 3
 MAX_NEMOTRON_FRAMES = 900
@@ -803,10 +803,27 @@ with status_col:
 # =========================
 # CAMERA
 # =========================
-camera = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
+@st.cache_resource
+def get_camera(index):
+    cam = cv2.VideoCapture(index)
 
-if not camera.isOpened():
-    st.error("Failed to open camera. Try changing CAMERA_INDEX to 0 or 2.")
+    if not cam.isOpened():
+        cam.release()
+        return None
+
+    return cam
+
+
+if st.button("Reset Camera", use_container_width=True):
+    get_camera.clear()
+    st.rerun()
+
+
+camera = get_camera(CAMERA_INDEX)
+active_camera_index = CAMERA_INDEX
+
+if camera is None:
+    st.error("Failed to open camera. Try clicking Reset Camera, then refresh Streamlit.")
     st.stop()
 
 verification_done = False
@@ -814,9 +831,10 @@ verification_done = False
 while True:
     success, frame = camera.read()
 
-    if not success:
-        st.error("Failed to read camera frame.")
-        break
+    if not success or frame is None:
+        st.warning("Camera frame not ready. Click Reset Camera if this stays.")
+        time.sleep(0.5)
+        continue
 
     height, width, _ = frame.shape
 
@@ -828,7 +846,6 @@ while True:
     original_frame = frame.copy()
     current_zone_frame = original_frame[zy1:zy2, zx1:zx2]
 
-    # Buffer zone frames for Nemotron step clip
     st.session_state.buffer_frame_counter += 1
 
     if st.session_state.buffer_frame_counter % FRAME_SAMPLE_INTERVAL == 0:
@@ -870,6 +887,7 @@ while True:
     display_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     zone_color = (0, 255, 0)
+
     if detected_action == "ASSEMBLE":
         zone_color = (255, 165, 0)
 
@@ -883,7 +901,7 @@ while True:
 
     cv2.putText(
         display_frame,
-        f"Assembly Zone - {detected_action}",
+        f"Assembly Zone - {detected_action} | Camera {active_camera_index}",
         (zx1, max(zy1 - 8, 22)),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
@@ -902,14 +920,11 @@ while True:
 
         now = time.time()
 
-        # Log current motion state before verification
         log_motion_action(now, current_step)
         st.session_state.motion_action_start_time = now
 
-        # Save Nemotron clip only. Do not analyze yet.
         save_current_step_clip(current_step)
 
-        # Log VERIFY action as NNVA
         verify_start = time.time()
 
         os.makedirs("captured", exist_ok=True)
@@ -927,7 +942,6 @@ while True:
         ]
 
         if missing_refs:
-            camera.release()
             st.session_state.last_result = {
                 "status": "waiting",
                 "message": f"Reference image not found: {missing_refs[0]}"
@@ -953,8 +967,6 @@ while True:
         )
 
         st.session_state.last_result = result
-
-        camera.release()
 
         if result["status"] == "wrong":
             log_action(
@@ -982,5 +994,3 @@ while True:
         st.rerun()
 
     time.sleep(0.03)
-
-camera.release()

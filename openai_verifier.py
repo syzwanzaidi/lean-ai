@@ -11,7 +11,7 @@ load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-MODEL_NAME = "gpt-4.1"
+MODEL_NAME = "gpt-4.1-mini"
 
 
 def file_hash(image_path):
